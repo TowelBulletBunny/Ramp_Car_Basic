@@ -127,52 +127,135 @@ void setup() {
 void loop() {
   if (!dmpReady) return;
 
-  // --- Step 1: Go UP ramp ---
-  // Phase 1: Move slightly onto the ramp
-  Serial.println("Going UP ramp (initial move)...");
-  forward(200);
-  delay(1000);   // Move only a short distance
-  motorsStop();
-  delay(300);   // Stabilize the MPU reading
+  float rampAngle = NAN; // declare ramp angle
 
-  // Phase 2: Measure ramp angle clearly while stopped
-  float rampAngle = getPitch();
-  if (!isnan(rampAngle)) {
-    lcd.setCursor(0, 1);
-    lcd.print("Angle: ");
-    lcd.print(rampAngle, 1);
-    lcd.print(" deg   ");
+  Serial.println("Going UP ramp...");
 
-    Serial.print("Measured Ramp Angle: ");
-    Serial.println(rampAngle);
-  }
+  // --- Step A: Move forward, detect ramp (>2 deg), accelerate, stop when angle stops changing ---
+  Serial.println("Searching for ramp...");
+  lcd.setCursor(0, 1);
+  lcd.print("Searching Ramp ");
 
-  // Phase 3: Continue climbing until slope flattens
-  Serial.println("Climbing ramp...");
+  forward(150); // always moving forward first
 
+  bool rampStarted = false;
+  float lastPitch = NAN;
+  unsigned long noChangeStart = 0;
 
   while (true) {
-    forward(200);
-    float pitch = getPitch();
-    if (!isnan(pitch) && abs(pitch) < 3) {  // flat area detected
-      break;
-    }
+      float pitch = getPitch();
+      if (isnan(pitch)) {
+          delay(20);
+          continue;
+      }
+
+      // --- Show pitch on LCD ---
+      lcd.setCursor(0, 0);
+      lcd.print("Angle:          ");
+      lcd.setCursor(7, 0);
+      lcd.print(pitch, 1);
+
+      // ===== 1. Ramp entry detection (pitch > 2°) =====
+      if (!rampStarted && pitch > 2) {
+          Serial.println("Ramp detected! Accelerating...");
+          lcd.setCursor(0, 1);
+          lcd.print("Ramp Up...      ");
+          rampStarted = true;
+
+          forward(150);       // accelerate
+          lastPitch = pitch;  // store reference angle
+          noChangeStart = millis();  // start timer for no-change detection
+      }
+
+      // ===== 2. Ramp already started → monitor angle change =====
+      if (rampStarted) {
+          forward(200); // keep accelerating
+
+          // check if pitch changed significantly (less than 0.3° difference)
+          if (abs(pitch - lastPitch) < 1.5) {
+              // angle stable — check if 1 sec passed
+              if (millis() - noChangeStart >= 20) {
+                  Serial.println("Pitch stable 2 sec — stopping!");
+                  motorsStop();
+                  rampAngle = pitch;  // store angle
+                  delay(300);
+                  break;
+              }
+          } else {
+              // angle changed → reset timer
+              lastPitch = pitch;
+              noChangeStart = millis();
+          }
+      }
+
+      delay(20);
   }
 
-  // --- Gradual slowdown at top of ramp ---
-  int speed = 120;
 
-  while (speed > 0) {
-      forward(speed);
-      speed -= 20;    // reduce speed step-by-step
-      delay(120);     // small delay for smooth slowdown
+  // --- Display angle once on LCD ---
+  lcd.setCursor(0, 0);
+  lcd.print("Angle:          ");
+  lcd.setCursor(7, 0);
+  if (isnan(rampAngle)) lcd.print("---");
+  else lcd.print(rampAngle, 1);
+
+  // --- Step B: Wait on ramp BEFORE going up ---
+  Serial.println("Holding on ramp...");
+  lcd.setCursor(0, 1);
+  lcd.print("Holding...      ");
+  delay(2000);   // <-- adjust this wait time if needed
+
+  // --- Step C: Accelerate up ramp, then decelerate when reaching top ---
+  Serial.println("Continuing up ramp...");
+
+  while (true) {
+      float pitch = getPitch();
+      if (isnan(pitch)) {
+          delay(40);
+          continue;
+      }
+
+      // --- Accelerate while still climbing ---
+      if (pitch >= 10) {  
+          forward(200);   // strong climb
+      }
+
+      // --- Decelerate when nearing the top ---
+      else {  
+          Serial.println("Beginning deceleration...");
+
+          int currentSpeed = 200;   // starting speed
+          int targetSpeed  = 0;   // lowest speed
+
+          // Smooth deceleration
+          for (float sp = currentSpeed; sp >= targetSpeed; sp -= 5) {
+              forward(sp);
+              delay(40);
+
+              float p = getPitch(); 
+              if (!isnan(p)) pitch = p;
+
+              // stop early if fully flat
+              if (pitch < 0) {
+                  Serial.println("Ramp top reached!");
+                  break;
+              }
+          }
+
+          break;  // leave the main while-loop
+      }
+
+      delay(40);
   }
 
-  motorsStop(); 
+  motorsStop();
+
 
 
   // --- Step 2: Wait 4 seconds ---
   Serial.println("Waiting on ramp...");
+  lcd.setCursor(0, 1);
+  lcd.print("Waiting...      ");
   delay(4000);
 
   // --- Step 3: Spin 360 using yaw (Code 1 logic) ---
@@ -193,6 +276,14 @@ void loop() {
 
     rotated += abs(delta);
     lastYaw = currentYaw;
+
+    // optional: show yaw progress on LCD (bottom row)
+    lcd.setCursor(0, 1);
+    lcd.print("Rot: ");
+    lcd.print((int)rotated);
+    lcd.print("    ");
+
+    delay(20);
   }
 
   motorsStop();
@@ -203,24 +294,32 @@ void loop() {
   forward(150);
   delay(2000);
   while (true) {
-    float pitch = getPitch();
-    if (!isnan(pitch) && pitch > -10) break;
+    float downPitch = getPitch();
+    // show on lcd
+    lcd.setCursor(0, 0);
+    lcd.print("Angle:          ");
+    lcd.setCursor(7, 0);
+    if (isnan(downPitch)) lcd.print("---");
+    else lcd.print(downPitch, 1);
+
+    if (!isnan(downPitch) && downPitch > -10) break;
+    delay(50);
   }
   motorsStop();
 
   // --- Done ---
   Serial.println("Finished ramp sequence.");
 
-  // Print "Ramp Angle:" at the top row
+  // Print final angle and finished
   lcd.setCursor(0, 0);
-  lcd.print("Angle:     "); // spaces clear leftover chars
+  lcd.print("Angle:          ");
+  lcd.setCursor(7, 0);
+  if (isnan(rampAngle)) lcd.print("---");
+  else lcd.print(rampAngle, 1);
 
-  lcd.setCursor(8, 0);     // print angle starting at column 8
-  lcd.print(rampAngle, 1);  // show 1 decimal place
-
-  // Print "Finished" at the bottom row
   lcd.setCursor(0, 1);
-  lcd.print("Finished       "); // extra spaces to clear old text
+  lcd.print("Finished       ");
 
   while (1);
 }
+
